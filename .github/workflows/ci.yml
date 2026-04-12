@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint_test:
+    name: Lint + Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci --include=dev
+      - name: Prepare artifacts
+        run: mkdir -p artifacts
+      - name: Secret scan (basic)
+        run: |
+          set -euo pipefail
+          if git ls-files -z | xargs -0 grep -IlE --exclude=.github/workflows/ci.yml -- '-----BEGIN (RSA|EC|DSA|OPENSSH) PRIVATE KEY-----|-----BEGIN PRIVATE KEY-----|AKIA[0-9A-Z]{16}|xox[baprs]-'; then
+            echo "Potential secret patterns detected. Remove and rotate any exposed keys."
+            exit 1
+          fi
+      - name: Lint + tests
+        run: |
+          set -euo pipefail
+          npm run smoke | tee artifacts/ci-smoke.log
+      - name: Audit dependencies
+        run: |
+          set -euo pipefail
+          npm audit --audit-level=low --json | tee artifacts/npm-audit.json
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-node-${{ matrix.node }}
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
