@@ -7,7 +7,7 @@ The information below is preserved for anyone forking or referencing this projec
 ## Scope and environment
 
 This repo contains Cisco RoomOS macros intended to run on RoomOS (QuickJS / ES Modules).
-The `package.json` tooling is only for offline linting and smoke tests (it uses a local `xapi` stub).
+The `package.json` tooling is only for offline linting and tests (they emulate the RoomOS runtime; see the Testing section of `README.md`).
 
 ## Development
 

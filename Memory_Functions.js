@@ -83,7 +83,7 @@ function parseStoreFromMacroContent(content) {
   try {
     return JSON.parse(jsonText);
   } catch (e) {
-    throw new Error(`Memory store parse error: ${e.message}`);
+    throw new Error(`Memory store parse error: ${e.message}`, { cause: e });
   }
 }
 
@@ -105,17 +105,34 @@ function saveStore(store) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  2.1) QUEUE: serialisiert alle Read-Modify-Write-Zugriffe          */
+/* ------------------------------------------------------------------ */
+let queue = Promise.resolve();
+
+function enqueue(op) {
+  const run = queue.then(op);
+  queue = run.catch(() => {});      // fehlgeschlagene Operation blockiert nichts
+  return run;
+}
+
+/* ------------------------------------------------------------------ */
 /*  3)   INITIALISIERUNG DES STORAGE-MACROS                           */
 /* ------------------------------------------------------------------ */
 function memoryInit() {
-  /*  Prüfen, ob das Storage-Macro bereits existiert  */
-  return xapi.Command.Macros.Macro.Get({ Name: config.storageMacro })
-    .then(() => undefined)                   // vorhanden → fertig
-    .catch(() => {                           // nicht vorhanden → anlegen
-      console.warn(`No storage macro found, creating "${config.storageMacro}" ...`);
+  /*  Alle Macros auflisten; nur wenn das Storage-Macro fehlt, anlegen.
+      Schlägt die Auflistung fehl, wird der Fehler weitergereicht, damit
+      vorhandene Daten nie überschrieben werden.  */
+  return xapi.Command.Macros.Macro.Get({})
+    .then((list) => {
+      const exists = Array.isArray(list?.Macro) &&
+        list.Macro.some((m) => m?.Name === config.storageMacro);
+      if (exists) return undefined;          // vorhanden → fertig
 
-      const initialContent =
-        `var memory = {
+      return enqueue(() => {                 // nicht vorhanden → anlegen
+        console.warn(`No storage macro found, creating "${config.storageMacro}" ...`);
+
+        const initialContent =
+          `var memory = {
     "./_$Info": {
         "Warning": "Do NOT modify this document, as other Scripts/Macros may rely on this information",
         "AvailableFunctions": {
@@ -137,8 +154,13 @@ function memoryInit() {
     "ExampleKey": "Example Value"
 }`;
 
-      return xapi.Command.Macros.Macro.Save({ Name: config.storageMacro }, initialContent)
-        .then(() => mem.print.global());
+        return xapi.Command.Macros.Macro.Save({ Name: config.storageMacro }, initialContent)
+          .then(() => getStore())
+          .then((store) => {
+            console.log(store);
+            return store;
+          });
+      }).then(() => undefined);
     });
 }
 
@@ -146,19 +168,51 @@ function memoryInit() {
 /*  4)   AUTO-IMPORT-UNTERSTÜTZUNG                                    */
 /* ------------------------------------------------------------------ */
 
-/*  Template, das in andere Makros eingefügt wird, falls dort xapi/mem
+/*  Bausteine, die in andere Makros eingefügt werden, falls dort xapi/mem
     noch nicht importiert sind.  Die Zuweisung von localScript nutzt
-    **bereits** den neuen ES-Modul-Ansatz und ist damit zukunftssicher.   */
-const importTemplate =
-  `import xapi from 'xapi';
-import { mem } from './Memory_Functions';
-
+    **bereits** den neuen ES-Modul-Ansatz und ist damit zukunftssicher.
+    Fehlen alle drei, ergibt sich genau das bisherige Import-Template.   */
+const importXapiLine = `import xapi from 'xapi';\n`;
+const importMemLine = `import { mem } from './Memory_Functions';\n`;
+const localScriptBlock = `
 mem.localScript = (typeof import.meta !== 'undefined' && import.meta.url)
   ? import.meta.url.split('/').pop().replace(/\\.js$/i, '')      // QuickJS / ES Modules
   : (typeof module !== 'undefined' && module.name)              // legacy Duktape
   || 'UnknownScript';                                           // final fallback
 
 `;
+
+/*  Erkennung bewusst großzügig (überall im Text, auch `import xapi, {…}`,
+    `* as xapi`, doppelte Anführungszeichen, `{ mem, … }`): lieber einen
+    Import nicht ergänzen als eine doppelte Bindung erzeugen, die das
+    Makro unlesbar macht.  */
+const xapiImportRegex = /import\s+[^;'"]*\bxapi\b[^;'"]*\bfrom\s*(['"])xapi\1/;
+const memImportRegex = /import\s*{[^}]*\bmem\b[^}]*}\s*from\s*(['"])\.\/Memory_Functions\1/;
+const localScriptRegex = /mem\.localScript\s*=/;
+
+/*  Einfügepunkt nur hinter einem xapi-Import ganz am Anfang (davor nur
+    Leerraum, danach höchstens `;` und ein //-Kommentar), sonst ganz oben –
+    beides liegt sicher außerhalb von Kommentaren und Strings.  */
+const leadingXapiImportRegex =
+  /^\s*import\s+xapi\s+from\s+(['"])xapi\1[ \t]*;?[ \t]*(?:\/\/[^\r\n]*)?(?:\r?\n|$)/;
+
+/*  Ergänzt nur die fehlenden Teile, ohne vorhandenen Code zu entfernen.  */
+function addMemImport(content) {
+  const missing =
+    (memImportRegex.test(content) ? '' : importMemLine) +
+    (localScriptRegex.test(content) ? '' : localScriptBlock);
+
+  if (!xapiImportRegex.test(content)) {
+    return importXapiLine + missing + content;
+  }
+  const lead = leadingXapiImportRegex.exec(content);
+  if (!lead) {
+    return missing + content;
+  }
+  const insertAt = lead[0].length;
+  const lineBreak = lead[0].endsWith('\n') ? '' : '\n';
+  return content.slice(0, insertAt) + lineBreak + missing + content.slice(insertAt);
+}
 
 function importMem() {
   if (config.autoImport.mode === false || config.autoImport.mode === 'false') {
@@ -170,18 +224,14 @@ function importMem() {
         return [];
       }
 
-      /* Regex matches only at start of content to avoid replacing inside strings/comments */
-      const importRegex =
-        /^([\s\S]*?import\s+xapi\s+from\s+'xapi'(?:;|\s*)(?:\n|\r)*)?(\s*import\s+{\s*mem\s*}\s+from\s+'.\/Memory_Functions'(?:;|\s*)(?:\n|\r)*)?(\s*mem\.localScript\s*=.*(?:;|\s*))?/;
-
       const savePromises = [];
 
       macroList.Macro.forEach((m) => {
         if (!m || m.Content === null || m.Content === undefined) return;
 
-        const hasXapi = /\s*import\s+xapi\s+from\s+'xapi'/.test(m.Content);
-        const hasMemImp = /import\s+{\s*mem\s*}\s+from\s+'.\/Memory_Functions'/.test(m.Content);
-        const hasLocal = /mem\.localScript\s*=/.test(m.Content);
+        const hasXapi = xapiImportRegex.test(m.Content);
+        const hasMemImp = memImportRegex.test(m.Content);
+        const hasLocal = localScriptRegex.test(m.Content);
 
         const needsPatch = !(hasXapi && hasMemImp && hasLocal);
 
@@ -218,7 +268,7 @@ function importMem() {
         if (!doPatch) { return; }
 
         /*  Patch einfügen  */
-        const newContent = m.Content.replace(importRegex, importTemplate);
+        const newContent = addMemImport(m.Content);
         savePromises.push(
           xapi.Command.Macros.Macro.Save({ Name: m.Name }, newContent)
             .then(() => {
@@ -239,82 +289,72 @@ function importMem() {
 /*  5)   HILFS-FUNKTIONEN (READ / WRITE / REMOVE / PRINT)             */
 /* ------------------------------------------------------------------ */
 
-mem.read = (key) => new Promise((resolve, reject) => {
-  mem.read.scoped(key, undefined).then(resolve).catch(reject);
-});
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
-mem.read.global = (key) => new Promise((resolve, reject) => {
-  getStore()
-    .then((store) => {
-      if (Object.prototype.hasOwnProperty.call(store, key)) {
-        resolve(store[key]);
-        return;
-      }
-      reject(new Error(`Global Read Error – key "${key}" not found.`));
-    })
-    .catch(reject);
-});
+/*  Scope-Objekt aus dem Store holen (kein Objekt → leerer Scope)  */
+function scopeOf(store, scopeKey) {
+  return (store && typeof store[scopeKey] === 'object' && store[scopeKey] !== null)
+    ? store[scopeKey]
+    : {};
+}
 
-mem.write = (key, value) => new Promise((resolve, reject) => {
-  mem.write.scoped(key, value, undefined)
-    .then(() => {
-      resolve(value);
-    })
-    .catch(reject);
-});
+/*  Komplettes Read-Modify-Write eines Scopes in einem Queue-Schritt  */
+function withScope(scopeName, fn) {
+  const scopeKey = scopeName || mem.localScript;
+  return enqueue(() => getStore().then((store) => fn(store, scopeOf(store, scopeKey), scopeKey)));
+}
 
-mem.write.global = (key, value) => new Promise((resolve, reject) => {
-  getStore()
-    .then((store) => {
-      store[key] = value;
-      return saveStore(store);
-    })
-    .then(() => {
-      console.debug(`Global Write: ${key}`);
-      resolve(value);
-    })
-    .catch(reject);
-});
+mem.read = (key) => mem.read.scoped(key, undefined);
 
-mem.remove = (key) => new Promise((resolve, reject) => {
-  mem.remove.scoped(key, undefined).then(resolve).catch(reject);
-});
+mem.read.global = (key) => enqueue(() => getStore().then((store) => {
+  if (!hasOwn(store, key)) {
+    throw new Error(`Global Read Error – key "${key}" not found.`);
+  }
+  return store[key];
+}));
 
-mem.remove.global = (key) => new Promise((resolve, reject) => {
-  getStore()
-    .then((store) => {
-      if (!Object.prototype.hasOwnProperty.call(store, key)) {
-        reject(new Error(`Global Delete Error – key "${key}" not found.`));
-        return;
-      }
+mem.write = (key, value) => mem.write.scoped(key, value, undefined);
 
-      delete store[key];
+mem.write.global = (key, value) => enqueue(() => getStore()
+  .then((store) => {
+    store[key] = value;
+    return saveStore(store);
+  })
+  .then(() => {
+    console.debug(`Global Write: ${key}`);
+    return value;
+  }));
 
-      return saveStore(store).then(() => {
-        console.warn(`Global key "${key}" deleted.`);
-        resolve(key);
-      });
-    })
-    .catch(reject);
-});
+mem.remove = (key) => mem.remove.scoped(key, undefined);
 
-mem.print = () => new Promise((resolve, reject) => {
-  mem.print.scoped(undefined).then(resolve).catch(reject);
-});
+mem.remove.global = (key) => enqueue(() => getStore().then((store) => {
+  if (!hasOwn(store, key)) {
+    throw new Error(`Global Delete Error – key "${key}" not found.`);
+  }
 
-mem.print.global = () => new Promise((resolve, reject) => {
-  getStore().then((store) => {
-    console.log(store);
-    resolve(store);
-  }).catch(reject);
-});
+  delete store[key];
+
+  return saveStore(store).then(() => {
+    console.warn(`Global key "${key}" deleted.`);
+    return key;
+  });
+}));
+
+mem.print = () => mem.print.scoped(undefined);
+
+mem.print.global = () => enqueue(() => getStore().then((store) => {
+  console.log(store);
+  return store;
+}));
 
 mem.info = () => {
   mem.read.global('./_$Info').then(console.log).catch(console.warn);
 };
 
 /* ------------------------------------------------------------------ */
-/*  5.1) SCOPED API (vermeidet race conditions zwischen Makros)        */
+/*  5.1) SCOPED API (Scope verhindert nur Überschreiben von            */
+/*       mem.localScript; die Queue serialisiert Schreibzugriffe nur   */
+/*       innerhalb dieser Modul-Instanz)                               */
 /* ------------------------------------------------------------------ */
 
 mem.for = (scopeName) => ({
@@ -326,79 +366,74 @@ mem.for = (scopeName) => ({
   writeGlobal: mem.write.global,
   removeGlobal: mem.remove.global,
   printGlobal: mem.print.global,
-  info: mem.info
+  info: mem.info,
+  update: (key, updater) => updateScoped(key, updater, scopeName)
 });
 
-mem.read.scoped = (key, scopeName) => new Promise((resolve, reject) => {
+mem.read.scoped = (key, scopeName) => withScope(scopeName, (store, scope, scopeKey) => {
+  if (!hasOwn(scope, key)) {
+    throw new Error(`Local Read Error – key "${key}" not found in "${scopeKey}".`);
+  }
+  return scope[key];
+});
+
+mem.write.scoped = (key, value, scopeName) => withScope(scopeName, (store, scope, scopeKey) => {
+  scope[key] = value;
+  store[scopeKey] = scope;
+
+  return saveStore(store).then(() => {
+    console.debug(`Local Write: [${scopeKey}] ${key}`);
+    return value;
+  });
+});
+
+mem.remove.scoped = (key, scopeName) => withScope(scopeName, (store, scope, scopeKey) => {
+  if (!hasOwn(scope, key)) {
+    throw new Error(`Local Delete Error – key "${key}" not found in "${scopeKey}".`);
+  }
+
+  delete scope[key];
+  store[scopeKey] = scope;
+
+  return saveStore(store).then(() => {
+    console.warn(`Local key "${key}" deleted from ${scopeKey}.`);
+    return key;
+  });
+});
+
+mem.print.scoped = (scopeName) => {
   const scopeKey = scopeName || mem.localScript;
+  return enqueue(() => getStore().then((store) => {
+    if (!hasOwn(store, scopeKey)) {
+      throw new Error(`Global Read Error – key "${scopeKey}" not found.`);
+    }
+    console.log(store[scopeKey]);
+    return store[scopeKey];
+  }));
+};
 
-  getStore()
-    .then((store) => {
-      const scope = (store && typeof store[scopeKey] === 'object' && store[scopeKey] !== null)
-        ? store[scopeKey]
-        : {};
+/*  Atomares Lesen → Ändern → Speichern eines vorhandenen Schlüssels (synchroner updater)  */
+function updateScoped(key, updater, scopeName) {
+  return withScope(scopeName, (store, scope, scopeKey) => {
+    if (!hasOwn(scope, key)) {
+      throw new Error(`Local Read Error – key "${key}" not found in "${scopeKey}".`);
+    }
 
-      if (Object.prototype.hasOwnProperty.call(scope, key)) {
-        resolve(scope[key]);
-        return;
-      }
+    /*  updater muss synchron sein: ein Promise würde als {} gespeichert,
+        und ein darin wartender mem-Aufruf blockierte die Queue.  */
+    const newValue = updater(scope[key]);
+    if (newValue && typeof newValue.then === 'function') {
+      throw new TypeError(`Local Update Error – updater for "${key}" must be synchronous.`);
+    }
+    scope[key] = newValue;
+    store[scopeKey] = scope;
 
-      reject(new Error(`Local Read Error – key "${key}" not found in "${scopeKey}".`));
-    })
-    .catch(reject);
-});
-
-mem.write.scoped = (key, value, scopeName) => new Promise((resolve, reject) => {
-  const scopeKey = scopeName || mem.localScript;
-
-  getStore()
-    .then((store) => {
-      const scope = (store && typeof store[scopeKey] === 'object' && store[scopeKey] !== null)
-        ? store[scopeKey]
-        : {};
-
-      scope[key] = value;
-      store[scopeKey] = scope;
-
-      return saveStore(store).then(() => {
-        console.debug(`Local Write: [${scopeKey}] ${key}`);
-        resolve(value);
-      });
-    })
-    .catch(reject);
-});
-
-mem.remove.scoped = (key, scopeName) => new Promise((resolve, reject) => {
-  const scopeKey = scopeName || mem.localScript;
-
-  getStore()
-    .then((store) => {
-      const scope = (store && typeof store[scopeKey] === 'object' && store[scopeKey] !== null)
-        ? store[scopeKey]
-        : {};
-
-      if (!Object.prototype.hasOwnProperty.call(scope, key)) {
-        reject(new Error(`Local Delete Error – key "${key}" not found in "${scopeKey}".`));
-        return;
-      }
-
-      delete scope[key];
-      store[scopeKey] = scope;
-
-      return saveStore(store).then(() => {
-        console.warn(`Local key "${key}" deleted from ${scopeKey}.`);
-        resolve(key);
-      });
-    })
-    .catch(reject);
-});
-
-mem.print.scoped = (scopeName) => new Promise((resolve, reject) => {
-  const scopeKey = scopeName || mem.localScript;
-  mem.read.global(scopeKey)
-    .then((data) => { console.log(data); resolve(data); })
-    .catch(reject);
-});
+    return saveStore(store).then(() => {
+      console.debug(`Local Write: [${scopeKey}] ${key}`);
+      return newValue;
+    });
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /*  6)   INITIAL STARTUP SEQUENCE                                     */

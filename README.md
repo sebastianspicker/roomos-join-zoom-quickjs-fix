@@ -1,12 +1,12 @@
 # Join-Zoom Macro · QuickJS Migration Fix
 
-> **ARCHIVED** -- This repository is read-only and no longer maintained. Cisco now provides native Zoom integration (OBTP, Zoom Rooms Connector) for RoomOS devices. For new deployments, use [Cisco’s native Zoom integration](#alternatives--successors) instead. See [ARCHIVE.md](ARCHIVE.md) for details.
+> **ARCHIVED** -- This repository is read-only and no longer maintained. Cisco now provides native Zoom integration (OBTP, Zoom Rooms Connector) for RoomOS devices. For new deployments, use [Cisco’s native Zoom integration](#alternatives--successors) instead. It remains available for existing deployments that still rely on the QuickJS migration fix.
 
 Resolve the `ReferenceError: ‘module’ is not defined` error on Cisco RoomOS 11.28+ by migrating the Join Zoom macro suite from CommonJS globals to ES Modules.
 
 ## Overview
 
-RoomOS 11.28 replaced the legacy Duktape runtime with QuickJS and removed CommonJS globals (`module`, `exports`, `require`, `__filename`, ...). Legacy macros that call `module.name` fail to load. This repo provides a safe, backward-compatible fix and a patched `Memory_Functions.js` for Join Zoom 4-1-1. See [ARCHIVE.md](ARCHIVE.md) for the canonical file list.
+RoomOS 11.28 replaced the legacy Duktape runtime with QuickJS and removed CommonJS globals (`module`, `exports`, `require`, `__filename`, ...). Legacy macros that call `module.name` fail to load. This repo provides a safe, backward-compatible fix and a patched `Memory_Functions.js` for Join Zoom 4-1-1.
 
 ## How it works
 
@@ -36,11 +36,11 @@ flowchart TB
   MemFn --> xapi
 ```
 
-The main macro imports config/text/memory helpers and drives RoomOS UI plus call placement through `xapi`. Validation errors (meeting ID, passcode, or role) stay in the prompt flow until corrected, instead of proceeding to dial. Memory storage failures are handled by recreating the storage macro path before continuing normal reads/writes.
+The main macro imports config/text/memory helpers and drives RoomOS UI plus call placement through `xapi`. Validation errors (meeting ID, passcode, or role) stay in the prompt flow until corrected, instead of proceeding to dial. `Memory_Storage` is created only at startup and only if it does not exist; later storage errors are reported to the caller and never trigger a rewrite of existing data.
 
 ## Lifecycle
 
-Startup runs in order: RoomOS loads macros; Memory_Functions sets `mem.localScript` (from `import.meta.url` or `module.name` fallback), then runs `memoryInit()` (ensures the Memory_Storage macro exists), then `importMem()` if enabled (patches other macros’ imports). When the `memoryReady` promise resolves, JoinZoom_Main’s `init()` runs: it validates config and page, sleeps 5s, registers call detection and Zoom Tools visibility, applies JoinWebex config, and reads or initializes PMI. Event listeners (Panel Clicked, TextInput, Prompt, Widget Action, Call status, CallDisconnect) are registered at load and are active once init has run.
+Startup runs in order: RoomOS loads macros; Memory_Functions sets `mem.localScript` (from `import.meta.url` or `module.name` fallback), then runs `memoryInit()` (creates the Memory_Storage macro only if no macro of that name exists; existing data is never overwritten), then `importMem()` if enabled (patches other macros’ imports). When the `memoryReady` promise resolves, JoinZoom_Main’s `init()` runs: it validates config and page, sleeps 5s, registers call detection and Zoom Tools visibility, applies JoinWebex config, and reads or initializes PMI. Event listeners (Panel Clicked, TextInput, Prompt, Widget Action, CallDisconnect) are registered at load; they ignore events until the companion `config` and `page` are usable, so they can already fire while `init()` is still waiting. Call detection is armed by `init()`.
 
 ```mermaid
 flowchart TB
@@ -50,32 +50,31 @@ flowchart TB
   ImportMem[importMem: optional patch other macros]
   Ready[memoryReady resolves]
   Init[Main init: config check, sleep, detectCall, PMI]
-  Listeners[Listeners active]
-  InitError[Init validation failure]
-  Recovery[Retry after config fix]
+  Listeners[Listeners registered at load]
+  InitError[Init stops: config/page missing]
   Load --> SetLocal
   SetLocal --> MemInit
   MemInit --> ImportMem
   ImportMem --> Ready
+  Load --> Listeners
   Ready --> Init
-  Init --> Listeners
   Init -->|missing config/page| InitError
-  InitError --> Recovery --> Init
 ```
 
-Lifecycle execution begins at macro load, prepares memory compatibility, then enables UI/event listeners once init succeeds. If init validation fails, execution follows an explicit recovery path and retries after config correction. During runtime, panel and prompt events gather meeting info; widget actions trigger `dialZoom()`, and disconnect events reset state for the next call.
+If init validation fails, `init()` logs the problem and stops; there is no automatic retry. Fix the companion config and restart the macros. During runtime, panel and prompt events gather meeting info; widget actions trigger `dialZoom()`, and disconnect events reset state for the next call.
 
 ## Features
 
-- Works on RoomOS ≤ 11.27 (Duktape) and ≥ 11.28 (QuickJS).
+- Targets RoomOS ≤ 11.27 (Duktape) and ≥ 11.28 (QuickJS); see the [compatibility matrix](#compatibility-matrix).
 - Universal replacement for `module.name` using `import.meta.url`.
-- Optional scoped memory API to avoid cross-macro race conditions.
-- Offline linting and tests via a local `xapi` stub.
+- Optional scoped memory API so concurrent macros do not overwrite each other's `mem.localScript`.
+- Storage writes are serialized, so concurrent writes from one macro do not lose data.
+- Offline lint and tests that emulate the RoomOS macro runtime.
 
 ## Requirements
 
 - Cisco RoomOS macros environment for deployment.
-- Node.js 18+ for local lint/test.
+- Node.js 22.15+ for local lint/test (development only; nothing is built or bundled).
 - Companion macros `JoinZoom_Config_4-1-1` and `JoinZoom_JoinText_4-1-1` (not included here; see [Required companion macros](#required-companion-macros-not-included-in-this-repo)).
 
 ## Quickstart
@@ -110,7 +109,12 @@ const localScriptName = localScriptNameFrom({
 
 const localMem = mem.for(localScriptName);
 // use localMem.read/write/remove instead of mem.read/write/remove
+// read-modify-write in one step; the updater must be synchronous
+// (rejects if the key does not exist yet or the updater returns a promise):
+await localMem.update('counter', (n) => n + 1);
 ```
+
+Storage writes are queued inside the `Memory_Functions` module instance. If your RoomOS version gives each importing macro its own module instance, writes from *different* macros can still race, because each write replaces the whole `Memory_Storage` document.
 
 ## Required companion macros (not included in this repo)
 
@@ -125,21 +129,21 @@ These are part of the original Cisco DevNet Join Zoom macro suite. Download them
 
 | File                     | Changes applied |
 | ------------------------ | ------- |
-| `Memory_Functions.js`    | Replaced `mem.localScript = module.name;` with the universal snippet; added scoped memory API. |
-| `JoinZoom_Main_4-1-1.js` | Replaced `module.name` usage with `localScriptNameFrom()`; updated `mem.remove.global()` to use `localScriptName`. |
+| `Memory_Functions.js`    | Replaced `mem.localScript = module.name;` with the universal snippet; added scoped memory API (`mem.for`, including atomic `update`); storage operations are serialized; `Memory_Storage` is created only when it does not exist. |
+| `JoinZoom_Main_4-1-1.js` | Replaced `module.name` usage with `localScriptNameFrom()`; updated `mem.remove.global()` to use `localScriptName`; personal meeting fields are updated atomically. |
 | Any other macro in your deployment | You must replace all remaining `module.name` references with the universal snippet yourself. |
 
 ## Compatibility matrix
 
 | Firmware                         | Patched macros | Result |
 | -------------------------------- | -------------- | ------ |
-| RoomOS ≤ 11.27 (Duktape)         | ✅              | Works (falls back to `module.name`) |
+| RoomOS ≤ 11.27 (Duktape)         | ✅              | Reported to work (falls back to `module.name`); not covered by this repo's tests |
 | RoomOS 11.28+ (QuickJS)          | ✅              | Works (uses `import.meta.url`) |
 | Any firmware                     | ❌              | Fails with `ReferenceError` |
 
 ## Configuration
 
-- `Memory_Functions.js` supports `config.autoImport` to inject required imports into other macros.
+- `Memory_Functions.js` supports `config.autoImport` to inject required imports into other macros. Only the missing pieces (`import xapi`, `import { mem }`, the `mem.localScript` assignment) are added, right after an `import xapi` line that opens the macro or otherwise at the very top; existing code is never removed. Detection errs towards "already present" (any `import … xapi … from 'xapi'` text, even in a comment) so a second binding is never created.
 - `JoinZoom_Main_4-1-1.js` configuration lives in `JoinZoom_Config_4-1-1` (external).
 
 ## Alternatives & Successors
@@ -154,34 +158,23 @@ These are part of the original Cisco DevNet Join Zoom macro suite. Download them
 
 ## Development
 
-Install dependencies:
-
 ```bash
-npm ci --include=dev
+npm ci        # install lint/test tooling
+npm run lint  # ESLint: macros may use only RoomOS globals and import only 'xapi' and sibling macros
+npm test      # node:test suites under test/
+npm run smoke # lint + test (the CI gate, together with npm audit)
 ```
 
-Lint:
-
-```bash
-npm run lint
-```
-
-Run tests:
-
-```bash
-npm test
-```
-
-Full local smoke (lint + tests):
-
-```bash
-npm run smoke
-```
+There is no build step: the two macro files at the repository root are deployed as-is, and each file name is the macro name on the device.
 
 ## Testing
 
-- Unit tests cover `Memory_Functions.js` behavior via the local `xapi` stub.
-- Join Zoom UI/flow tests are deferred because required companion macros are not in this repo.
+Tests run the unmodified macro files under Node with `test/support/roomos-runtime.js`, a module hook that emulates RoomOS module resolution:
+
+- `'xapi'` resolves to `test/support/fake-xapi.js`, an in-memory fake that records commands and lets tests emit events.
+- Macro imports such as `'./Memory_Functions'` resolve to the root files; the companion macros `JoinZoom_Config_4-1-1` and `JoinZoom_JoinText_4-1-1` resolve to test doubles in `test/fixtures/`.
+
+`JoinZoom_Main_4-1-1.js` starts itself on import, so each `test/join-zoom-main.*.test.js` file covers one configuration scenario. Device behavior of the real companion macros is not covered.
 
 ## Security
 
@@ -193,7 +186,7 @@ npm run smoke
 
 - `ReferenceError: 'module' is not defined`: ensure the universal snippet replaced all `module.name` references.
 - `JoinZoom_Main_4-1-1.js` fails to load: install the companion macros listed above.
-- Tests fail with `xapi` errors: run `npm ci` so the local `xapi` stub is installed.
+- Tests fail with `unknown macro import`: add the macro to the table in `test/support/roomos-runtime.js`.
 
 ## Credits
 

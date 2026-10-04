@@ -2,17 +2,18 @@
   "name": "cisco-roomos-join-zoom-macro-quickjs-migration-fix",
   "private": true,
   "type": "module",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=22.15"
+  },
   "scripts": {
     "lint": "eslint .",
-    "test": "node --test",
-    "smoke": "npm run lint && npm test",
-    "validate": "npm run smoke"
+    "test": "node --import ./test/support/roomos-runtime.js --test \"test/**/*.test.js\"",
+    "smoke": "npm run lint && npm test"
   },
   "devDependencies": {
-    "@eslint/js": "^9.19.0",
-    "eslint": "^9.19.0",
-    "globals": "^15.14.0",
-    "xapi": "file:./tools/xapi-stub"
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.12.0",
+    "globals": "^17.13.0"
   }
 }

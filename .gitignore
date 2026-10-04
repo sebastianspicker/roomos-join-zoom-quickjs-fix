@@ -26,8 +26,5 @@ junit-*.xml
 .vscode/
 .cursor/
 
-# docs (local findings/logs/decisions)
-DECISIONS.md
-FINDINGS.md
-LOG.md
-REFACTOR_PLAN.md
+# local agent handoff notes
+.agents/
