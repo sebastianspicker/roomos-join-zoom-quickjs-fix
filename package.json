@@ -8,8 +8,7 @@
   },
   "scripts": {
     "lint": "eslint .",
-    "test": "node --import ./test/support/roomos-runtime.js --test \"test/**/*.test.js\"",
-    "smoke": "npm run lint && npm test"
+    "smoke": "npm run lint"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

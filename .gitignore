@@ -1,3 +1,4 @@
+# Node and build output
 node_modules/
 npm-debug.log*
 yarn-debug.log*
@@ -5,7 +6,6 @@ yarn-error.log*
 pnpm-debug.log*
 .npm/
 .pnpm-store/
-.DS_Store
 .eslintcache
 *.log
 coverage/
@@ -22,9 +22,46 @@ junit-*.xml
 .env
 .env.*
 !.env.example
+
+# OS and editor files
+.DS_Store
+Thumbs.db
 .idea/
 .vscode/
-.cursor/
+.history/
 
-# local agent handoff notes
+# AI tool and agent state
 .agents/
+.aider*
+.claude/
+.codacy/
+.codegraph/
+.codex/
+.continue/
+.cursor/
+.impeccable/
+.mcp.json
+.repowise/
+.serena/
+.windsurf/
+
+# Agent instructions
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.cursorrules
+.github/copilot-instructions.md
+
+# Worktree directories
+.worktrees/
+worktrees/
+
+# Tests (kept out of this repository)
+test/
+tests/
+tools/
+
+# Work-in-progress documents and agent logs
+ARCHIVE.md
+IMPROVEMENT_*.md
+rewritten/

@@ -69,12 +69,12 @@ If init validation fails, `init()` logs the problem and stops; there is no autom
 - Universal replacement for `module.name` using `import.meta.url`.
 - Optional scoped memory API so concurrent macros do not overwrite each other's `mem.localScript`.
 - Storage writes are serialized, so concurrent writes from one macro do not lose data.
-- Offline lint and tests that emulate the RoomOS macro runtime.
+- Offline lint that enforces the RoomOS macro runtime constraints.
 
 ## Requirements
 
 - Cisco RoomOS macros environment for deployment.
-- Node.js 22.15+ for local lint/test (development only; nothing is built or bundled).
+- Node.js 22.15+ for local linting (development only; nothing is built or bundled).
 - Companion macros `JoinZoom_Config_4-1-1` and `JoinZoom_JoinText_4-1-1` (not included here; see [Required companion macros](#required-companion-macros-not-included-in-this-repo)).
 
 ## Quickstart
@@ -137,7 +137,7 @@ These are part of the original Cisco DevNet Join Zoom macro suite. Download them
 
 | Firmware                         | Patched macros | Result |
 | -------------------------------- | -------------- | ------ |
-| RoomOS ≤ 11.27 (Duktape)         | ✅              | Reported to work (falls back to `module.name`); not covered by this repo's tests |
+| RoomOS ≤ 11.27 (Duktape)         | ✅              | Reported to work (falls back to `module.name`); not verified by this repo |
 | RoomOS 11.28+ (QuickJS)          | ✅              | Works (uses `import.meta.url`) |
 | Any firmware                     | ❌              | Fails with `ReferenceError` |
 
@@ -159,22 +159,12 @@ These are part of the original Cisco DevNet Join Zoom macro suite. Download them
 ## Development
 
 ```bash
-npm ci        # install lint/test tooling
+npm ci        # install lint tooling
 npm run lint  # ESLint: macros may use only RoomOS globals and import only 'xapi' and sibling macros
-npm test      # node:test suites under test/
-npm run smoke # lint + test (the CI gate, together with npm audit)
+npm run smoke # lint (the CI gate, together with npm audit)
 ```
 
 There is no build step: the two macro files at the repository root are deployed as-is, and each file name is the macro name on the device.
-
-## Testing
-
-Tests run the unmodified macro files under Node with `test/support/roomos-runtime.js`, a module hook that emulates RoomOS module resolution:
-
-- `'xapi'` resolves to `test/support/fake-xapi.js`, an in-memory fake that records commands and lets tests emit events.
-- Macro imports such as `'./Memory_Functions'` resolve to the root files; the companion macros `JoinZoom_Config_4-1-1` and `JoinZoom_JoinText_4-1-1` resolve to test doubles in `test/fixtures/`.
-
-`JoinZoom_Main_4-1-1.js` starts itself on import, so each `test/join-zoom-main.*.test.js` file covers one configuration scenario. Device behavior of the real companion macros is not covered.
 
 ## Security
 
@@ -186,7 +176,6 @@ Tests run the unmodified macro files under Node with `test/support/roomos-runtim
 
 - `ReferenceError: 'module' is not defined`: ensure the universal snippet replaced all `module.name` references.
 - `JoinZoom_Main_4-1-1.js` fails to load: install the companion macros listed above.
-- Tests fail with `unknown macro import`: add the macro to the table in `test/support/roomos-runtime.js`.
 
 ## Credits
 

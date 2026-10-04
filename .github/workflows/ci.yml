@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [dev]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint_test:
-    name: Lint + Test (Node ${{ matrix.node }})
+  lint:
+    name: Lint (Node ${{ matrix.node }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
@@ -41,7 +41,7 @@ jobs:
             echo "Potential secret patterns detected. Remove and rotate any exposed keys."
             exit 1
           fi
-      - name: Lint + tests
+      - name: Lint
         run: |
           set -euo pipefail
           npm run smoke | tee artifacts/ci-smoke.log

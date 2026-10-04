@@ -5,7 +5,6 @@ What does this change do?
 
 ## Testing
 - [ ] `npm run lint`
-- [ ] `npm test`
 - [ ] `npm run smoke`
 
 ## Risk / Rollback

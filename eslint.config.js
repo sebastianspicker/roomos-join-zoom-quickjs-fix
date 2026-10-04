@@ -7,7 +7,7 @@ const MACROS = ['Memory_Functions.js', 'JoinZoom_Main_4-1-1.js'];
 
 export default [
   {
-    ignores: ['node_modules/**', '.claude/**']
+    ignores: ['node_modules/**']
   },
   js.configs.recommended,
   {
@@ -39,7 +39,7 @@ export default [
     }
   },
   {
-    files: ['eslint.config.js', 'test/**/*.js'],
+    files: ['eslint.config.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
