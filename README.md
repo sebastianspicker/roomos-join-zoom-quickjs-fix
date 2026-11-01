@@ -1,8 +1,23 @@
 # Join-Zoom Macro · QuickJS Migration Fix
 
-> **ARCHIVED** -- This repository is read-only and no longer maintained. Cisco now provides native Zoom integration (OBTP, Zoom Rooms Connector) for RoomOS devices. For new deployments, use [Cisco’s native Zoom integration](#alternatives--successors) instead. It remains available for existing deployments that still rely on the QuickJS migration fix.
 
 Resolve the `ReferenceError: ‘module’ is not defined` error on Cisco RoomOS 11.28+ by migrating the Join Zoom macro suite from CommonJS globals to ES Modules.
+
+<details>
+<summary>Status and limitations</summary>
+
+**Project status: archived independent migration fix.** I developed this example
+independently alongside my main professional work. The repository is read-only and no
+longer maintained; it is a starting point to review and adapt, rather than a
+ready-to-use meeting-room product. It remains available for existing deployments using
+the QuickJS fix. Cisco provides native Zoom integration (OBTP, Zoom Rooms Connector);
+for new deployments, see [Alternatives & Successors](#alternatives--successors).
+
+**Disclaimer.** Compatibility and call behavior depend on your devices, software and
+companion macros. Test your deployment before operational use; responsibility for
+deployment and use remains with you.
+
+</details>
 
 ## Overview
 
@@ -168,7 +183,7 @@ There is no build step: the two macro files at the repository root are deployed 
 
 ## Security
 
-- CI runs a basic secret scan, `npm audit`, and CodeQL SAST.
+- Quality CI runs the basic secret scan, lint and `npm audit` only for Dependabot-authored PRs or manual dispatch. CodeQL is a separate security-only workflow that may run on pushes, PRs, its schedule or manual dispatch. Archived GitHub execution and code-scanning availability remain separate constraints.
 - Do not log or paste sensitive values (meeting IDs, host keys, phone numbers).
 - Report vulnerabilities via `SECURITY.md`.
 
