@@ -3,6 +3,8 @@
 
 Resolve the `ReferenceError: ‘module’ is not defined` error on Cisco RoomOS 11.28+ by migrating the Join Zoom macro suite from CommonJS globals to ES Modules.
 
+> _Claude was used to polish and proof-read the code and documentation of this repository._
+
 <details>
 <summary>Status and limitations</summary>
 
@@ -25,58 +27,160 @@ RoomOS 11.28 replaced the legacy Duktape runtime with QuickJS and removed Common
 
 ## How it works
 
-The Join Zoom macro suite is made of several pieces: the main macro drives the UI and call flow; the Config macro supplies dial logic, regex, and settings; the JoinText macro supplies prompts and copy; Memory_Functions provides scoped and global persistent storage; and the Memory_Storage macro (created by Memory_Functions if missing) holds the stored data. The main macro imports Config, JoinText, and Memory_Functions, and uses the RoomOS `xapi` for UI and placing calls.
+Everything runs inside one RoomOS device. There is no server and no build: each `.js` file is a macro, RoomOS runs it, and macros talk to each other through ES-module `import` and to the device through the `xapi` module. The touch panel UI, the call stack and the macro store are all reached through `xapi`.
+
+### What it is made of
 
 ```mermaid
-flowchart TB
-  subgraph macros [Macros]
-    Main[JoinZoom_Main]
-    Config[JoinZoom_Config]
-    JoinText[JoinZoom_JoinText]
+flowchart LR
+  user((User))
+  subgraph device [RoomOS device]
+    subgraph repo [Macros in this repo]
+      Main[JoinZoom_Main]
+      MemFn[Memory_Functions]
+    end
+    subgraph companion [Companion macros, not in repo]
+      Config[JoinZoom_Config]
+      JoinText[JoinZoom_JoinText]
+    end
+    MemStore[(Memory_Storage macro)]
+    xapi[RoomOS xapi]
   end
-  subgraph storage [Storage]
-    MemFn[Memory_Functions]
-    MemStore[Memory_Storage]
-  end
-  xapi[RoomOS xapi]
-  Main -->|imports| Config
-  Main -->|imports| JoinText
-  Main -->|imports| MemFn
-  Main -->|UI and Call| xapi
-  Main -->|validation error| UiFail[Show error prompt]
-  UiFail -->|retry input| Main
-  MemFn -->|read/write via Macro.Get/Save| MemStore
-  MemFn -->|storage missing| StoreRecreate[Create Memory_Storage]
-  StoreRecreate --> MemStore
-  MemFn --> xapi
+  zoom[Zoom SIP service]
+  user -->|taps touch panel| xapi
+  xapi -.->|UI and call events| Main
+  Main -->|"import regex, dialZoom, DTMF"| Config
+  Main -->|"import page prompts"| JoinText
+  Main -->|"import mem, memoryReady"| MemFn
+  Main -->|"panels, prompts, config"| xapi
+  Config -->|"dial (inferred)"| xapi
+  MemFn -->|"Macro.Get / Macro.Save"| MemStore
+  xapi -->|SIP call| zoom
+  classDef focus fill:#fde68a,stroke:#b45309,color:#1f2937
+  class Main focus
 ```
 
-The main macro imports config/text/memory helpers and drives RoomOS UI plus call placement through `xapi`. Validation errors (meeting ID, passcode, or role) stay in the prompt flow until corrected, instead of proceeding to dial. `Memory_Storage` is created only at startup and only if it does not exist; later storage errors are reported to the caller and never trigger a rewrite of existing data.
+`JoinZoom_Main` is the only macro with behaviour of its own: it listens for touch-panel events and moves the user through the join flow. `JoinZoom_Config` and `JoinZoom_JoinText` come from the original DevNet suite; Main imports the dial logic, regexes and settings from Config and the prompt pages from JoinText. How `dialZoom()` places the call is not in this repo, so the Config → `xapi` edge is inferred. `Memory_Functions` keeps persistent data by saving it as the source text of another macro, `Memory_Storage`.
 
-## Lifecycle
+Where in the code:
 
-Startup runs in order: RoomOS loads macros; Memory_Functions sets `mem.localScript` (from `import.meta.url` or `module.name` fallback), then runs `memoryInit()` (creates the Memory_Storage macro only if no macro of that name exists; existing data is never overwritten), then `importMem()` if enabled (patches other macros’ imports). When the `memoryReady` promise resolves, JoinZoom_Main’s `init()` runs: it validates config and page, sleeps 5s, registers call detection and Zoom Tools visibility, applies JoinWebex config, and reads or initializes PMI. Event listeners (Panel Clicked, TextInput, Prompt, Widget Action, CallDisconnect) are registered at load; they ignore events until the companion `config` and `page` are usable, so they can already fire while `init()` is still waiting. Call detection is armed by `init()`.
+- [JoinZoom_Main_4-1-1.js](JoinZoom_Main_4-1-1.js): imports at the top, event listeners (`xapi.event.on(...)`) further down.
+- [Memory_Functions.js](Memory_Functions.js): `getStore()` / `saveStore()` read and write `Memory_Storage`.
+
+### Startup
 
 ```mermaid
 flowchart TB
   Load[RoomOS loads macros]
-  SetLocal[Memory_Functions sets mem.localScript]
-  MemInit[memoryInit: ensure Memory_Storage exists]
-  ImportMem[importMem: optional patch other macros]
+  SetLocal[set mem.localScript]
+  MemInit[memoryInit]
+  ImportMem[importMem]
   Ready[memoryReady resolves]
-  Init[Main init: config check, sleep, detectCall, PMI]
-  Listeners[Listeners registered at load]
-  InitError[Init stops: config/page missing]
+  Listeners[Main registers listeners]
+  Init[Main init]
+  InitError[Init stops, logs error]
   Load --> SetLocal
   SetLocal --> MemInit
-  MemInit --> ImportMem
-  ImportMem --> Ready
+  MemInit -->|"create Memory_Storage<br/>only if missing"| ImportMem
+  ImportMem -->|"autoImport off: no-op"| Ready
   Load --> Listeners
   Ready --> Init
-  Init -->|missing config/page| InitError
+  Init -->|"config or page missing"| InitError
 ```
 
-If init validation fails, `init()` logs the problem and stops; there is no automatic retry. Fix the companion config and restart the macros. During runtime, panel and prompt events gather meeting info; widget actions trigger `dialZoom()`, and disconnect events reset state for the next call.
+Startup runs in order: RoomOS loads macros; Memory_Functions sets `mem.localScript` (from `import.meta.url` or `module.name` fallback), then runs `memoryInit()` (creates the Memory_Storage macro only if no macro of that name exists; existing data is never overwritten), then `importMem()` if enabled (patches other macros’ imports). When the `memoryReady` promise resolves, JoinZoom_Main’s `init()` runs: it validates config and page, sleeps 5s, registers call detection and Zoom Tools visibility, applies JoinWebex config, and reads or initializes PMI. If `memoryReady` rejects (for example, the macro list cannot be read), `init()` fails and logs `init failed`.
+
+Event listeners (Panel Clicked, TextInput, Prompt, Widget Action, CallDisconnect) are registered at load; they ignore events until the companion `config` and `page` are usable, so they can already fire while `init()` is still waiting. Call detection is armed by `init()`. If init validation fails, `init()` logs the problem and stops; there is no automatic retry. Fix the companion config and restart the macros.
+
+Where in the code:
+
+- [Memory_Functions.js](Memory_Functions.js): `applyLocalScriptName()`, `memoryInit()`, `importMem()`, and `memoryReady` at the bottom.
+- [JoinZoom_Main_4-1-1.js](JoinZoom_Main_4-1-1.js): `init()` and the `init().then(...)` call below it.
+
+### Joining a meeting
+
+This is the "new" panel style (`config.ui.settings.style === 'new'`); the classic style runs the same checks through a chain of prompts instead of panel widgets.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant ui as RoomOS UI (xapi)
+  participant main as JoinZoom_Main
+  participant text as JoinZoom_JoinText
+  participant cfg as JoinZoom_Config
+  U->>ui: Tap "Join Zoom" panel
+  ui-)main: Panel Clicked
+  main->>ui: Panel Open, reset fields
+  U->>ui: Tap meeting ID field
+  ui-)main: Widget Action
+  main->>text: page.meetingID()
+  text->>ui: TextInput prompt
+  U->>ui: Type meeting ID
+  ui-)main: TextInput Response (~01~)
+  main->>cfg: checkRegex(text, 'meetingid')
+  alt invalid
+    main->>text: page.meetingID.error()
+  else valid
+    main->>ui: show ID in panel
+  end
+  Note over U,cfg: Passcode (~03~) and optional host key (~04~) work the same way
+  U->>ui: Tap "Call Zoom"
+  ui-)main: Widget Action (CallZoom)
+  main->>cfg: dialZoom(id, passcode, hostkey)
+  main->>ui: "Connecting to Zoom" prompt
+  ui-)main: CallSuccessful
+  main->>ui: show Zoom Tools if Zoom SIP
+```
+
+Steps 1–3 open the panel; steps 4–12 repeat per field until `checkRegex()` accepts the input, so an invalid value never reaches the dialer. Meeting ID, passcode and host key are held in memory only, Base64-encoded (not encrypted), in `meetingInfo`. After the call connects (step 17), `detectCall()` matches the remote number against `config.regex.zoom_SIP` and shows the DTMF Zoom Tools panel; on `CallDisconnect` the state is cleared and, with `securityMode` on, Zoom entries are removed from call history.
+
+Where in the code ([JoinZoom_Main_4-1-1.js](JoinZoom_Main_4-1-1.js)):
+
+- `Panel Clicked` listener and `openNewStylePanel()`: steps 1–3.
+- `UserInterface Extensions Widget Action` listener: field taps and `~HostKey~CallZoom`.
+- `UserInterface Message TextInput Response` listener: the `'01'`, `'03'`, `'04'` cases.
+- `detectCall()`, `showConnectingPrompt()` and the `CallDisconnect` listener.
+
+### What is stored
+
+Personal Meeting (PMI) data is the only thing `JoinZoom_Main` writes to persistent storage. It goes through the scoped memory API; every operation is one read-modify-write of the whole `Memory_Storage` macro, queued so operations from the same module instance never interleave.
+
+```mermaid
+flowchart LR
+  caller["localMem.update()"]
+  queue[enqueue]
+  get["Macro.Get"]
+  parse[parse JSON]
+  change[change one scope]
+  save["Macro.Save"]
+  caller -->|"key, updater"| queue
+  queue -->|next in line| get
+  get -->|macro text| parse
+  parse -->|store object| change
+  change -->|whole store| save
+```
+
+| Key in `Memory_Storage` | Holds | Written by |
+| --- | --- | --- |
+| `./_$Info` | usage notes for humans | `memoryInit()` on first creation |
+| `<macro name>` (e.g. `JoinZoom_Main_4-1-1`) | that macro's scoped keys; for Main, `btoa('PMIInfo')` → Base64 meeting ID, passcode, host key | `mem.for(name).write/update` |
+| any other top-level key | global values | `mem.write.global` |
+
+The file is stored as `var memory = {...};` and read back by taking the text between the first `{` and the last `}`. With `personalMode` off, `init()` deletes Main's whole scope from the store.
+
+Where in the code ([Memory_Functions.js](Memory_Functions.js)): `enqueue()`, `withScope()`, `updateScoped()`, `parseStoreFromMacroContent()`; in [JoinZoom_Main_4-1-1.js](JoinZoom_Main_4-1-1.js): `PMI_KEYS`, `updatePmiField()`.
+
+### Code map
+
+| Path | Responsibility |
+| --- | --- |
+| [JoinZoom_Main_4-1-1.js](JoinZoom_Main_4-1-1.js) | UI event handling, join flow, call detection, PMI; deployed as a macro |
+| [Memory_Functions.js](Memory_Functions.js) | QuickJS-safe macro name, persistent storage API, optional auto-import; deployed as a macro |
+| [eslint.config.js](eslint.config.js) | Lint rules that mimic the RoomOS runtime (allowed globals, `xapi`/sibling imports only) |
+| [package.json](package.json) | Dev-only lint tooling (`npm run lint`, `npm run smoke`) |
+| [.github/workflows/ci.yml](.github/workflows/ci.yml) | Secret scan, lint and `npm audit` (manual or Dependabot PRs) |
+| [.github/workflows/codeql.yml](.github/workflows/codeql.yml) | CodeQL security scan |
 
 ## Features
 
