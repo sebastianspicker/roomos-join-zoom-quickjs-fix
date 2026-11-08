@@ -240,16 +240,20 @@ function zoomToolsVisibility(visibility) {
 
 let detectCallActive = false;
 let offCallSuccessful;
+let callGeneration = 0;
 function detectCall() {
-    /* A call that never connected leaves its CallSuccessful listener behind; drop it. */
+    /* A call that never connected leaves its CallSuccessful listener behind; drop it.
+       The generation check covers runtimes whose once() returns no unsubscribe function. */
     if (typeof offCallSuccessful === 'function') offCallSuccessful();
     offCallSuccessful = undefined;
+    callGeneration++;
     if (detectCallActive) return;
     detectCallActive = true;
     xapi.status.once('Call RemoteNumber', (remoteNumber) => {
         detectCallActive = false;
+        const generation = callGeneration;
         offCallSuccessful = xapi.event.once('CallSuccessful', () => {
-            if (!isConfigAndPageReady()) return;
+            if (generation !== callGeneration || !isConfigAndPageReady()) return;
             if (typeof remoteNumber !== 'string') {
                 console.warn('detectCall: unexpected remoteNumber type:', typeof remoteNumber, remoteNumber);
                 return;
@@ -285,8 +289,9 @@ xapi.event.on('CallDisconnect', () => {
             entries.forEach((entry) => {
                 const callback = entry.CallbackNumber;
                 if (typeof callback !== 'string') return;
-                /* Same Zoom matcher as detectCall, so every Zoom SIP domain is purged. */
-                if (callback.split('@')[1] === ZOOM_CALLBACK_DOMAIN_ALLOWLIST || (anyZoom && anyZoom.test(callback))) {
+                /* Same Zoom matcher as detectCall, so every Zoom SIP domain is purged.
+                   search() ignores a g flag and leaves lastIndex alone, unlike test(). */
+                if (callback.split('@')[1] === ZOOM_CALLBACK_DOMAIN_ALLOWLIST || (anyZoom && callback.search(anyZoom) !== -1)) {
                     xapi.command('CallHistory DeleteEntry', {
                         CallHistoryId: entry.CallHistoryId,
                         DeleteConsecutiveDuplicates: 'True'
