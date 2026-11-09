@@ -48,6 +48,7 @@ Thumbs.db
 # Agent instructions
 AGENTS.md
 CLAUDE.md
+CODEX.md
 GEMINI.md
 .cursorrules
 .github/copilot-instructions.md
@@ -65,3 +66,12 @@ tools/
 ARCHIVE.md
 IMPROVEMENT_*.md
 rewritten/
+
+# Local maintenance records and assistant scratch.
+/.ai/
+/scratchpad/
+/*_LEDGER.md
+/*_ledger.md
+/ALPHA_AUDIT*.md
+/ALPHA_IMPLEMENTATION_LEDGER.md
+/ALPHA_PR_DESCRIPTION.md

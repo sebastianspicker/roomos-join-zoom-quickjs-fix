@@ -11,11 +11,14 @@ import { config, sleep, checkRegex, findDTMF, sendDTMF, dialZoom, handleDualScre
 import { page } from './JoinZoom_JoinText_4-1-1'
 import { mem, localScriptNameFrom, memoryReady } from './Memory_Functions';
 
-/* btoa/atob polyfill for environments (e.g. QuickJS) that do not provide them */
+/* btoa/atob polyfill for environments (e.g. QuickJS) that do not provide them.
+   Like the native versions they throw on invalid input instead of returning garbage. */
+const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
 if (typeof btoa === 'undefined') {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    const chars = B64_CHARS;
     globalThis.btoa = (str) => {
         let s = String(str);
+        if (/[\u0100-\uFFFF]/.test(s)) throw new Error('btoa: string contains characters outside Latin-1');
         let out = '';
         for (let i = 0; i < s.length; i += 3) {
             const a = s.charCodeAt(i);
@@ -28,9 +31,9 @@ if (typeof btoa === 'undefined') {
 }
 if (typeof atob === 'undefined') {
     globalThis.atob = (str) => {
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+        const chars = B64_CHARS;
         let s = String(str).replace(/=+$/, '');
-        if (s.length % 4 === 1) throw new Error('Invalid base64 string');
+        if (s.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(s)) throw new Error('Invalid base64 string');
         let out = '';
         for (let i = 0; i < s.length; i += 4) {
             const a = chars.indexOf(s[i]); const b = chars.indexOf(s[i + 1]);
@@ -186,21 +189,8 @@ async function init() {
     if (config.ui.settings.personalMode) {
         await localMem.read(PMI_KEYS.info).then((result) => {
             message.Init.PersonalMode['Enabled'] = true;
-            let isSet = 0;
-            if (result[PMI_KEYS.meetingId] === '' || result[PMI_KEYS.meetingId] === undefined) {
-                isSet++;
-            }
-            if (result[PMI_KEYS.passcode] === '' || result[PMI_KEYS.passcode] === undefined) {
-                isSet++;
-            }
-            if (result[PMI_KEYS.hostKey] === '' || result[PMI_KEYS.hostKey] === undefined) {
-                isSet++;
-            }
-            if (isSet > 0) {
-                message.Init.PersonalMode['isSet?'] = false;
-            } else {
-                message.Init.PersonalMode['isSet?'] = true;
-            }
+            message.Init.PersonalMode['isSet?'] = [PMI_KEYS.meetingId, PMI_KEYS.passcode, PMI_KEYS.hostKey]
+                .every((k) => result[k] !== '' && result[k] !== undefined);
         }).catch((e) => {
             /* Only a missing key means first run; any other failure must not overwrite stored PMI. */
             if (!String(e?.message).startsWith('Local Read Error')) {
@@ -249,13 +239,21 @@ function zoomToolsVisibility(visibility) {
 }
 
 let detectCallActive = false;
+let offCallSuccessful;
+let callGeneration = 0;
 function detectCall() {
+    /* A call that never connected leaves its CallSuccessful listener behind; drop it.
+       The generation check covers runtimes whose once() returns no unsubscribe function. */
+    if (typeof offCallSuccessful === 'function') offCallSuccessful();
+    offCallSuccessful = undefined;
+    callGeneration++;
     if (detectCallActive) return;
     detectCallActive = true;
     xapi.status.once('Call RemoteNumber', (remoteNumber) => {
         detectCallActive = false;
-        xapi.event.once('CallSuccessful', () => {
-            if (!isConfigAndPageReady()) return;
+        const generation = callGeneration;
+        offCallSuccessful = xapi.event.once('CallSuccessful', () => {
+            if (generation !== callGeneration || !isConfigAndPageReady()) return;
             if (typeof remoteNumber !== 'string') {
                 console.warn('detectCall: unexpected remoteNumber type:', typeof remoteNumber, remoteNumber);
                 return;
@@ -287,9 +285,13 @@ xapi.event.on('CallDisconnect', () => {
             const entries = result?.Entry || [];
             if (entries.length === 0) return;
 
+            const anyZoom = config.regex?.zoom_SIP?.any;
             entries.forEach((entry) => {
-                const temp = entry.CallbackNumber?.split('@');
-                if (temp?.[1] === ZOOM_CALLBACK_DOMAIN_ALLOWLIST) {
+                const callback = entry.CallbackNumber;
+                if (typeof callback !== 'string') return;
+                /* Same Zoom matcher as detectCall, so every Zoom SIP domain is purged.
+                   search() ignores a g flag and leaves lastIndex alone, unlike test(). */
+                if (callback.split('@')[1] === ZOOM_CALLBACK_DOMAIN_ALLOWLIST || (anyZoom && callback.search(anyZoom) !== -1)) {
                     xapi.command('CallHistory DeleteEntry', {
                         CallHistoryId: entry.CallHistoryId,
                         DeleteConsecutiveDuplicates: 'True'
@@ -442,27 +444,18 @@ xapi.event.on('UserInterface Message TextInput Response', (event) => {
                 })
                 break;
             case 'p1':
-                switch (page.type) {
-                    case 'opr':
-                    case 'err':
-                        updatePmiField(PMI_KEYS.meetingId, btoa(text), 'meeting ID');
-                        break;
+                if (page.type === 'opr' || page.type === 'err') {
+                    storeValidatedPmi(text, 'meetingid', PMI_KEYS.meetingId, 'meeting ID', () => page.personal.meetingId());
                 }
                 break;
             case 'p2':
-                switch (page.type) {
-                    case 'opr':
-                    case 'err':
-                        updatePmiField(PMI_KEYS.passcode, btoa(text), 'passcode');
-                        break;
+                if (page.type === 'opr' || page.type === 'err') {
+                    storeValidatedPmi(text, 'passcode', PMI_KEYS.passcode, 'passcode', () => page.personal.passcode());
                 }
                 break;
             case 'p3':
-                switch (page.type) {
-                    case 'opr':
-                    case 'err':
-                        updatePmiField(PMI_KEYS.hostKey, btoa(text), 'host key');
-                        break;
+                if (page.type === 'opr' || page.type === 'err') {
+                    storeValidatedPmi(text, 'hostkey', PMI_KEYS.hostKey, 'host key', () => page.personal.hostKey());
                 }
                 break;
             default:
@@ -620,6 +613,7 @@ xapi.event.on('UserInterface Extensions Widget Action', (event) => {
                         role: 'host'
                     };
                     dialZoom(meetingInfo.meetingid, meetingInfo.passcode, meetingInfo.hostkey);
+                    showConnectingPrompt(meetingInfo.meetingid, true);
                 }).catch((e) => {
                     console.warn('JoinZoom_Main: CallPersonalZoom failed to read PMI from storage:', e);
                 });
@@ -638,6 +632,16 @@ xapi.event.on('UserInterface Extensions Widget Action', (event) => {
         }
     }
 })
+
+/** Validate PMI input like the join flow, then store it; on reject re-open the same prompt. */
+function storeValidatedPmi(text, kind, field, label, reprompt) {
+    checkRegex(text, kind).then((check) => {
+        if (check === true) updatePmiField(field, btoa(text), label);
+    }).catch((e) => {
+        console.warn(`JoinZoom_Main: invalid ${label}, prompting user to re-enter:`, e);
+        reprompt();
+    });
+}
 
 /** Atomically replace one stored PMI field, then refresh the personal textbox. */
 function updatePmiField(field, value, label) {

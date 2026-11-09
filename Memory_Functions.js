@@ -119,17 +119,25 @@ function enqueue(op) {
 /*  3)   INITIALISIERUNG DES STORAGE-MACROS                           */
 /* ------------------------------------------------------------------ */
 function memoryInit() {
-  /*  Alle Macros auflisten; nur wenn das Storage-Macro fehlt, anlegen.
-      Schlägt die Auflistung fehl, wird der Fehler weitergereicht, damit
-      vorhandene Daten nie überschrieben werden.  */
+  /*  Alle Macros auflisten; nur wenn das Storage-Macro fehlt oder
+      nachweislich leer ist, anlegen.  Schlägt eine Abfrage fehl, wird der
+      Fehler weitergereicht, damit vorhandene Daten nie überschrieben werden.  */
   return xapi.Command.Macros.Macro.Get({})
     .then((list) => {
       const exists = Array.isArray(list?.Macro) &&
         list.Macro.some((m) => m?.Name === config.storageMacro);
-      if (exists) return undefined;          // vorhanden → fertig
+      if (!exists) return true;
+      return xapi.Command.Macros.Macro.Get({ Content: 'True', Name: config.storageMacro })
+        .then((e) => {
+          const content = e?.Macro?.[0]?.Content;
+          return typeof content === 'string' && content.trim() === '';   // leer → nichts zu verlieren
+        });
+    })
+    .then((needsCreate) => {
+      if (!needsCreate) return undefined;    // vorhanden mit Inhalt → fertig
 
-      return enqueue(() => {                 // nicht vorhanden → anlegen
-        console.warn(`No storage macro found, creating "${config.storageMacro}" ...`);
+      return enqueue(() => {                 // fehlt oder leer → anlegen
+        console.warn(`No usable storage macro found, creating "${config.storageMacro}" ...`);
 
         const initialContent =
           `var memory = {
@@ -405,7 +413,7 @@ mem.print.scoped = (scopeName) => {
   const scopeKey = scopeName || mem.localScript;
   return enqueue(() => getStore().then((store) => {
     if (!hasOwn(store, scopeKey)) {
-      throw new Error(`Global Read Error – key "${scopeKey}" not found.`);
+      throw new Error(`Local Read Error – scope "${scopeKey}" not found.`);
     }
     console.log(store[scopeKey]);
     return store[scopeKey];
